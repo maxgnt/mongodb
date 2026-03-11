@@ -90,9 +90,8 @@ db.transactions.aggregate([
 ]);
 db.transactions_backup.countDocuments();
 
-// ==========================================
+
 // Partie 1.2 - Validation de l'import
-// ==========================================
 
 // Question 1.2.1
 // Affichage des 5 premières transactions pour analyser la structure
@@ -175,11 +174,9 @@ db.transactions.findOne(
 // Transaction_Date est bien en type date
 // Les 3 champs booléens sont bien en true/false
 
-// ==========================================
 // Partie 2 - Exploration et CRUD
-// ==========================================
 
-// ---- 2.1 Opérations de lecture basiques ----
+// 2.1 Opérations de lecture basiques 
 
 // Question 2.1.1
 // Nombre total de transactions
@@ -384,3 +381,449 @@ db.transactions.aggregate([
   });
   // Résultat : deletedCount = 772
   // Les 772 transactions ont bien été déplacées de transactions vers archive_transactions
+
+  // Question 3.1.1
+// Heures de la journée avec le plus de fraudes
+db.transactions.aggregate([
+    { $match: { Fraud_Label: "Fraud" } },
+    {
+      $project: {
+        heure: { $toInt: { $substr: ["$Transaction_Time", 0, 2] } }
+      }
+    },
+    {
+      $group: {
+        _id: "$heure",
+        nb_fraudes: { $sum: 1 }
+      }
+    },
+    { $sort: { nb_fraudes: -1 } },
+    { $project: { _id: 0, heure: "$_id", nb_fraudes: 1 } }
+  ]);
+  
+  // Résultat (top 5) :
+  // 13h : 85 fraudes
+  // 21h : 82 fraudes
+  // 2h  : 79 fraudes
+  // 23h : 76 fraudes
+  // 18h : 74 fraudes
+  // Les fraudes sont réparties sur toute la journée, mais on note
+  // une légère surreprésentation en début d'après-midi et en soirée/nuit
+
+  // Question 3.1.2
+// Clients ayant effectué plus de 10 transactions en une journée
+// avec au moins une fraude
+db.transactions.aggregate([
+    { $match: { Transaction_Date: { $type: "date" } } },
+    {
+      $group: {
+        _id: {
+          customer: "$Customer_ID",
+          date: { $dateToString: { format: "%Y-%m-%d", date: "$Transaction_Date" } }
+        },
+        nb_transactions: { $sum: 1 },
+        nb_fraudes: { $sum: { $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, 1, 0] } }
+      }
+    },
+    {
+      $match: {
+        nb_transactions: { $gt: 10 },
+        nb_fraudes: { $gte: 1 }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        Customer_ID: "$_id.customer",
+        date: "$_id.date",
+        nb_transactions: 1
+      }
+    },
+    { $sort: { nb_transactions: -1 } }
+  ]);
+  
+  // Résultat : aucun client ne correspond
+  // C'est cohérent car les clients les plus actifs ont au maximum
+  // 5-6 transactions au total dans le dataset, donc impossible
+  // d'en avoir plus de 10 en une seule journée
+
+  // Question 3.2.1
+// Les 5 localisations avec le taux de fraude le plus élevé
+db.transactions.aggregate([
+    {
+      $group: {
+        _id: "$Transaction_Location",
+        total: { $sum: 1 },
+        nb_fraudes: { $sum: { $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, 1, 0] } }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        localisation: "$_id",
+        total: 1,
+        nb_fraudes: 1,
+        taux_fraude_pct: {
+          $round: [{ $multiply: [{ $divide: ["$nb_fraudes", "$total"] }, 100] }, 2]
+        }
+      }
+    },
+    { $sort: { taux_fraude_pct: -1 } },
+    { $limit: 5 }
+  ]);
+  
+  // Résultats :
+  // 1. Singapore : 188 fraudes / 4958 transactions (3.79%)
+  // 2. London :  174 fraudes / 4829 transactions (3.60%)
+  // 3. Bangkok : 171 fraudes / 4904 transactions (3.49%)
+  // 4. Multan : 171 fraudes / 5010 transactions (3.41%)
+  // 5. Dubai : 162 fraudes / 4840 transactions (3.35%)
+  // Les taux sont relativement proches, pas de localisation qui se démarque fortement
+
+  // Question 3.2.2
+// Transactions "à distance" : localisation ≠ domicile et distance > 200 km
+db.transactions.aggregate([
+    {
+      $match: {
+        $expr: { $ne: ["$Transaction_Location", "$Customer_Home_Location"] },
+        Distance_From_Home: { $gt: 200 }
+      }
+    },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: 1 },
+        nb_fraudes: { $sum: { $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, 1, 0] } }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        total: 1,
+        nb_fraudes: 1,
+        taux_fraude_pct: {
+          $round: [{ $multiply: [{ $divide: ["$nb_fraudes", "$total"] }, 100] }, 2]
+        }
+      }
+    }
+  ]);
+  
+  // Résultat : 29590 transactions, 988 fraudes, taux = 3.34%
+  // Étonnamment, ce taux est inférieur au taux global (4.85%)
+  // La distance seule n'est donc pas un indicateur fort de fraude
+
+  // Question 3.3.1
+// Les 10 marchands avec le montant total de fraudes le plus élevé
+db.transactions.aggregate([
+    {
+      $match: {
+        Fraud_Label: "Fraud",
+        "Transaction_Amount (in Million)": { $type: "number" }
+      }
+    },
+    {
+      $group: {
+        _id: "$Merchant_ID",
+        montant_total_fraudes: { $sum: "$Transaction_Amount (in Million)" },
+        nb_fraudes: { $sum: 1 },
+        montant_moyen: { $avg: "$Transaction_Amount (in Million)" }
+      }
+    },
+    { $sort: { montant_total_fraudes: -1 } },
+    { $limit: 10 },
+    {
+      $project: {
+        _id: 0,
+        Merchant_ID: "$_id",
+        montant_total_fraudes: 1,
+        nb_fraudes: 1,
+        montant_moyen: { $round: ["$montant_moyen", 2] }
+      }
+    }
+  ]);
+  
+  // Résultat (top 5) :
+  // Merchant 65819 : 14M total, 2 fraudes, moyenne 7M
+  // Merchant 28999 : 12M total, 2 fraudes, moyenne 6M
+  // Merchant 95335 : 12M total, 2 fraudes, moyenne 6M
+  // Merchant 71892 : 10M total, 2 fraudes, moyenne 5M
+  // Merchant 82108 : 10M total, 2 fraudes, moyenne 5M
+  // Les marchands les plus touchés ont peu de fraudes (1-2) mais avec des montants élevés
+
+  // Question 3.3.2
+// Ratio crédit/débit par catégorie de marchand
+db.transactions.aggregate([
+    {
+      $group: {
+        _id: "$Merchant_Category",
+        nb_credit: {
+          $sum: { $cond: [{ $eq: ["$Card_Type", "Credit"] }, 1, 0] }
+        },
+        nb_debit: {
+          $sum: { $cond: [{ $eq: ["$Card_Type", "Debit"] }, 1, 0] }
+        }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        categorie: "$_id",
+        nb_credit: 1,
+        nb_debit: 1,
+        ratio_credit_debit: {
+          $round: [{ $divide: ["$nb_credit", { $max: ["$nb_debit", 1] }] }, 2]
+        }
+      }
+    },
+    { $sort: { ratio_credit_debit: -1 } }
+  ]);
+  
+  // Résultat :
+  // Grocery : ratio 1.01 (légèrement plus de crédit)
+  // Electronics : ratio 1.00
+  // Clothing :  ratio 0.99
+  // Fuel :  ratio 0.99
+  // Restaurant : ratio 0.99
+  // ATM : ratio 0.97 (légèrement plus de débit)
+  // Les ratios sont très proches de 1 pour toutes les catégories,
+  // il n'y a pas de préférence marquée crédit vs débit selon la catégorie
+  // Note : une catégorie vide ("") avec 8 transactions existe (données incomplètes)
+
+  // Question 3.4.1
+// Transactions dont le montant dépasse 300% de la moyenne du client
+db.transactions.aggregate([
+    {
+      $match: {
+        "Transaction_Amount (in Million)": { $type: "number" },
+        "Avg_Transaction_Amount (in Million)": { $type: "number" }
+      }
+    },
+    {
+      $match: {
+        $expr: {
+          $gt: [
+            "$Transaction_Amount (in Million)",
+            { $multiply: ["$Avg_Transaction_Amount (in Million)", 3] }
+          ]
+        }
+      }
+    },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: 1 },
+        nb_fraudes: { $sum: { $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, 1, 0] } }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        total: 1,
+        nb_fraudes: 1,
+        taux_fraude_pct: {
+          $round: [{ $multiply: [{ $divide: ["$nb_fraudes", "$total"] }, 100] }, 2]
+        }
+      }
+    }
+  ]);
+  
+  // Résultat : 9937 transactions exceptionnelles, 354 fraudes, taux = 3.56%
+  // Ce taux est inférieur au taux global (4.85%)
+  // Un montant élevé par rapport à la moyenne du client n'est donc pas
+  // un indicateur fort de fraude dans ce dataset
+
+
+  // Question 3.4.2
+// Transactions avec nouveau marchand ET internationale
+db.transactions.aggregate([
+    {
+      $match: {
+        Is_New_Merchant: true,
+        Is_International_Transaction: true
+      }
+    },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: 1 },
+        nb_fraudes: { $sum: { $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, 1, 0] } }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        total: 1,
+        nb_fraudes: 1,
+        taux_fraude_pct: {
+          $round: [{ $multiply: [{ $divide: ["$nb_fraudes", "$total"] }, 100] }, 2]
+        }
+      }
+    }
+  ]);
+  
+  // Résultat : 12356 transactions, 561 fraudes, taux = 4.54%
+  // Proche du taux global (4.85%), la combinaison nouveau marchand +
+  // transaction internationale n'est pas un indicateur fort de fraude
+
+  // Question 3.4.3
+// Transactions "suspectes" : au moins 3 critères sur 6 sont vrais
+// Critères : montant > 2x moyenne, heure inhabituelle, nouveau marchand,
+// internationale, distance > 100 km, plus de 5 transactions/jour
+db.transactions.aggregate([
+    {
+      $match: {
+        "Transaction_Amount (in Million)": { $type: "number" },
+        "Avg_Transaction_Amount (in Million)": { $type: "number" }
+      }
+    },
+    {
+      $addFields: {
+        suspicion_score: {
+          $sum: [
+            { $cond: [{ $gt: ["$Transaction_Amount (in Million)", { $multiply: ["$Avg_Transaction_Amount (in Million)", 2] }] }, 1, 0] },
+            { $cond: ["$Unusual_Time_Transaction", 1, 0] },
+            { $cond: ["$Is_New_Merchant", 1, 0] },
+            { $cond: ["$Is_International_Transaction", 1, 0] },
+            { $cond: [{ $gt: ["$Distance_From_Home", 100] }, 1, 0] },
+            { $cond: [{ $gt: ["$Daily_Transaction_Count", 5] }, 1, 0] }
+          ]
+        }
+      }
+    },
+    { $match: { suspicion_score: { $gte: 3 } } },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: 1 },
+        nb_fraudes: { $sum: { $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, 1, 0] } }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        total: 1,
+        nb_fraudes: 1,
+        taux_fraude_pct: {
+          $round: [{ $multiply: [{ $divide: ["$nb_fraudes", "$total"] }, 100] }, 2]
+        }
+      }
+    }
+  ]);
+  
+  // Résultat : 32219 transactions suspectes, 1228 fraudes, taux = 3.81%
+  // Le taux est inférieur au taux global (4.85%)
+  // Les critères combinés ne semblent pas être des indicateurs forts de fraude
+  // dans ce dataset, ce qui suggère que les fraudes sont distribuées
+  // de manière relativement aléatoire parmi les transactions
+
+  // Question 4.1.1
+// Analyse des performances sans index
+// Note : Is_International_Transaction adapté en true (converti en booléen en Partie 1.2.2)
+db.transactions.find({
+    "Transaction_Amount (in Million)": { $gt: 5 },
+    Fraud_Label: "Fraud",
+    Is_International_Transaction: true
+  }).explain("executionStats");
+  
+  // Résultat :
+  // - executionTimeMillis : 666 ms
+  // - totalDocsExamined : 49228
+  // - nReturned : 470
+  // - stage : COLLSCAN (scan complet de la collection, aucun index utilisé)
+  // MongoDB parcourt les 49228 documents pour n'en retourner que 470,
+  // ce qui est très inefficace (ratio examinés/retournés ≈ 105:1)
+
+  // Question 4.1.2
+// 3 requêtes fréquentes pour un système de détection de fraude en temps réel
+// Analyse des performances SANS index
+
+// Requête 1 : vérifier les fraudes d'un client spécifique
+db.transactions.find({
+    Customer_ID: 67961,
+    Fraud_Label: "Fraud"
+  }).explain("executionStats");
+  // executionTimeMillis : 816 ms | totalDocsExamined : 49228
+  // nReturned : 0 | stage : COLLSCAN
+  
+  // Requête 2 : transactions à haut risque frauduleuses
+  db.transactions.find({
+    risk_level: "HIGH",
+    Fraud_Label: "Fraud"
+  }).explain("executionStats");
+  // executionTimeMillis : 60 ms | totalDocsExamined : 49228
+  // nReturned : 269 | stage : COLLSCAN
+  
+  // Requête 3 : fraudes internationales dans la catégorie Electronics
+  db.transactions.find({
+    Is_International_Transaction: true,
+    Fraud_Label: "Fraud",
+    Merchant_Category: "Electronics"
+  }).explain("executionStats");
+  // executionTimeMillis : 83 ms | totalDocsExamined : 49228
+  // nReturned : 145 | stage : COLLSCAN
+  
+  // Constat : les 3 requêtes font un COLLSCAN (scan complet de 49228 docs)
+  // même quand elles ne retournent que peu ou pas de résultats
+  // C'est inacceptable pour un système temps réel qui doit répondre en < 10ms
+
+  // Question 4.2.1
+// Création d'un index sur Fraud_Label
+db.transactions.createIndex({ Fraud_Label: 1 });
+
+// Ré-exécution de la requête 4.1.1 avec explain
+db.transactions.find({
+  "Transaction_Amount (in Million)": { $gt: 5 },
+  Fraud_Label: "Fraud",
+  Is_International_Transaction: true
+}).explain("executionStats");
+
+// Résultat APRÈS index :
+// - executionTimeMillis : 54 ms (avant : 666 ms → ÷12)
+// - totalDocsExamined : 1650 (avant : 49228 → ÷30)
+// - nReturned : 470
+// - stage : FETCH (utilise l'index IXSCAN sur Fraud_Label puis FETCH des documents)
+//
+// L'index sur Fraud_Label permet à MongoDB de ne scanner que les documents
+// frauduleux au lieu de toute la collection, d'où l'amélioration significative
+
+// Question 4.2.2
+// Index composé selon la règle ESR (Equality, Sort, Range)
+// Requête cible :
+// db.transactions.find({
+//   Customer_ID: "CUST0012345",
+//   "Transaction_Amount (in Million)": { $gte: 1, $lte: 10 }
+// }).sort({ Transaction_Date: -1 })
+//
+// Application de la règle ESR :
+// 1. Equality : Customer_ID (recherche exacte avec =)
+// 2. Sort : Transaction_Date (tri décroissant)
+// 3. Range : Transaction_Amount (plage $gte/$lte)
+// L'ordre est important : placer le champ de tri AVANT le range
+// permet à MongoDB d'éviter un tri en mémoire
+
+db.transactions.createIndex({
+    Customer_ID: 1,
+    Transaction_Date: -1,
+    "Transaction_Amount (in Million)": 1
+  });
+
+  // Question 4.2.3
+// Index pour recherches par localisation et catégorie de marchand
+db.transactions.createIndex({
+    Transaction_Location: 1,
+    Merchant_Category: 1
+  });
+  
+  // Test d'efficacité
+  db.transactions.find({
+    Transaction_Location: "Dubai",
+    Merchant_Category: "Electronics"
+  }).explain("executionStats");
+  
+  // Résultat :
+  // - executionTimeMillis : 35 ms
+  // - totalDocsExamined : 782
+  // - nReturned : 782
+  // - stage : FETCH
+  // Ratio examinés/retournés = 1:1, l'index est parfaitement optimal
+  // MongoDB ne parcourt que les documents correspondant aux critères
