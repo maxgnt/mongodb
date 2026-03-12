@@ -827,3 +827,180 @@ db.transactions.createIndex({
   // - stage : FETCH
   // Ratio examinés/retournés = 1:1, l'index est parfaitement optimal
   // MongoDB ne parcourt que les documents correspondant aux critères
+
+  // Question 4.2.4
+// Index unique sur IP_Address
+// Première tentative :
+db.transactions.createIndex({ IP_Address: 1 }, { unique: true });
+// Erreur : DuplicateKey : des doublons existent (valeurs vides "")
+
+// Solution : index unique partiel qui ignore les valeurs vides
+// Note : $ne n'est pas supporté dans les partial indexes, on utilise $gt
+db.transactions.createIndex(
+  { IP_Address: 1 },
+  { unique: true, partialFilterExpression: { IP_Address: { $gt: "" } } }
+);
+// L'index est créé avec succès
+// Les documents avec IP_Address vide sont exclus de l'index,
+// ce qui permet d'imposer l'unicité uniquement sur les vraies adresses IP
+
+// Question 4.3.1
+// Index partiel : uniquement les transactions frauduleuses > 1 million
+db.transactions.createIndex(
+    { "Transaction_Amount (in Million)": 1 },
+    {
+      partialFilterExpression: {
+        Fraud_Label: "Fraud",
+        "Transaction_Amount (in Million)": { $gt: 1 }
+      }
+    }
+  );
+  
+  // Pourquoi un index partiel est utile ?
+  // Il n'indexe qu'un sous-ensemble des documents (ici les fraudes > 1M),
+  // ce qui réduit la taille de l'index en mémoire et accélère les requêtes
+  // ciblant spécifiquement ce sous-ensemble.
+  // Dans un système de détection de fraude, on interroge souvent les fraudes
+  // à montant élevé, donc cet index est pertinent pour ce cas d'usage.
+
+  // Question 4.3.2
+// Index sparse sur Previous_Fraud_Count
+db.transactions.createIndex(
+    { Previous_Fraud_Count: 1 },
+    { sparse: true }
+  );
+  
+  // Différence entre un index sparse et un index normal :
+  // - Index normal : indexe TOUS les documents, y compris ceux où le champ
+  //   est absent (indexé avec la valeur null)
+  // - Index sparse : n'indexe QUE les documents où le champ existe
+  // Avantage : l'index est plus petit en mémoire car il exclut les documents
+  // sans le champ Previous_Fraud_Count
+  // Inconvénient : les requêtes avec sort sur ce champ peuvent ne pas
+  // retourner tous les documents si certains n'ont pas le champ
+
+  // Question 4.3.3
+// Liste de tous les index et leurs tailles
+db.transactions.getIndexes();
+db.transactions.stats().indexSizes;
+
+// Index existants et tailles :
+// 1. _id_ : 1019 Ko (par défaut, obligatoire)
+// 2. Fraud_Label_1 : 250 Ko
+// 3. Customer_ID_1_Transaction_Date_-1_Transaction_Amount_1 : 1122 Ko (le plus gros)
+// 4. Transaction_Location_1_Merchant_Category_1 : 340 Ko
+// 5. IP_Address_1 (unique, partiel) : 909 Ko
+// 6. Transaction_Amount (in Million)_1 (partiel) : 29 Ko (très petit grâce au filtre partiel)
+// 7. Previous_Fraud_Count_1 (sparse) : 324 Ko
+//
+// Analyse :
+// - L'index partiel sur Transaction_Amount ne fait que 29 Ko grâce au filtre
+//   (seules les fraudes > 1M sont indexées), c'est très efficace
+// - L'index composé Customer_ID est le plus gros (1122 Ko) car il contient 3 champs
+// - Pas d'index redondant détecté : chaque index couvre un cas d'usage différent
+// - Tous les index sont utiles pour les requêtes du système de détection de fraude
+
+// Question 4.4.1
+// Index couvrant pour une covered query
+// L'index doit contenir TOUS les champs de la requête et de la projection
+db.transactions.createIndex({
+    Customer_ID: 1,
+    "Transaction_Amount (in Million)": 1,
+    Transaction_Date: 1
+  });
+  
+  // Vérification avec explain
+  db.transactions.find(
+    { Customer_ID: "CUST0012345" },
+    { Customer_ID: 1, "Transaction_Amount (in Million)": 1, Transaction_Date: 1, _id: 0 }
+  ).explain("executionStats");
+  
+  // Résultat : totalDocsExamined = 0
+  // C'est une covered query : MongoDB répond uniquement à partir de l'index
+  // sans jamais accéder aux documents sur disque
+  // Condition essentielle : _id: 0 dans la projection, car _id n'est pas dans l'index
+  // C'est le type de requête le plus performant possible
+
+
+  // Question 5.1.1
+// Montant total, moyen et nombre de transactions par type de carte
+db.transactions.aggregate([
+    {
+      $match: {
+        "Transaction_Amount (in Million)": { $type: "number" }
+      }
+    },
+    {
+      $group: {
+        _id: "$Card_Type",
+        montant_total: { $sum: "$Transaction_Amount (in Million)" },
+        montant_moyen: { $avg: "$Transaction_Amount (in Million)" },
+        nb_transactions: { $sum: 1 }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        carte: "$_id",
+        montant_total: 1,
+        montant_moyen: { $round: ["$montant_moyen", 2] },
+        nb_transactions: 1
+      }
+    },
+    { $sort: { montant_total: -1 } }
+  ]);
+  
+  // Résultat :
+  // Debit  : 123288M total, 24707 transactions, moyenne 4.99M
+  // Credit : 122850M total, 24509 transactions, moyenne 5.01M
+  // (vide) : 13M total, 3 transactions, moyenne 4.33M
+  // Les deux types de carte sont très équilibrés en volume et en montant
+
+  // Question 5.1.2
+// Analyse par catégorie de marchand : total, fraudes, taux, montant moyen
+db.transactions.aggregate([
+    {
+      $match: {
+        "Transaction_Amount (in Million)": { $type: "number" }
+      }
+    },
+    {
+      $group: {
+        _id: "$Merchant_Category",
+        total: { $sum: 1 },
+        nb_fraudes: { $sum: { $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, 1, 0] } },
+        montant_fraudes: {
+          $sum: {
+            $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, "$Transaction_Amount (in Million)", 0]
+          }
+        }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        categorie: "$_id",
+        total: 1,
+        nb_fraudes: 1,
+        taux_fraude_pct: {
+          $round: [{ $multiply: [{ $divide: ["$nb_fraudes", "$total"] }, 100] }, 2]
+        },
+        montant_moyen_fraudes: {
+          $round: [{ $divide: ["$montant_fraudes", { $max: ["$nb_fraudes", 1] }] }, 2]
+        }
+      }
+    },
+    { $match: { taux_fraude_pct: { $gt: 10 } } },
+    { $sort: { taux_fraude_pct: -1 } }
+  ]);
+  
+  // Résultat : aucune catégorie ne dépasse 10% de fraude
+  // Les taux réels sont très homogènes :
+  // Fuel: 3.57%
+  // ATM: 3.50%
+  // Restaurant: 3.45%
+  // Clothing: 3.26%
+  // Grocery: 3.25%
+  // Electronics: 3.08%
+  // Les fraudes sont réparties uniformément entre les catégories,
+  // aucune catégorie ne se distingue comme particulièrement à risque
