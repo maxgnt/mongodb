@@ -1004,3 +1004,439 @@ db.transactions.aggregate([
   // Electronics: 3.08%
   // Les fraudes sont réparties uniformément entre les catégories,
   // aucune catégorie ne se distingue comme particulièrement à risque
+
+  // Question 5.1.3
+// Les 20 clients avec le solde de compte le plus élevé
+db.transactions.aggregate([
+    {
+      $match: {
+        "Account_Balance (in Million)": { $type: "number" }
+      }
+    },
+    {
+      $group: {
+        _id: "$Customer_ID",
+        solde: { $max: "$Account_Balance (in Million)" },
+        nb_transactions: { $sum: 1 }
+      }
+    },
+    { $sort: { solde: -1 } },
+    { $limit: 20 },
+    {
+      $project: {
+        _id: 0,
+        Customer_ID: "$_id",
+        solde: 1,
+        nb_transactions: 1
+      }
+    }
+  ]);
+  
+  // Résultat : les 20 clients les plus riches ont tous un solde de 39M
+  // La majorité n'ont qu'1-2 transactions, sauf le client 16391 (3 transactions)
+  // Le solde maximum semble plafonné à 39M dans ce dataset
+
+  db.transactions.aggregate([
+    {
+      $match: {
+        Transaction_Date: { $type: "date" },
+        "Transaction_Amount (in Million)": { $type: "number" }
+      }
+    },
+    {
+      $group: {
+        _id: { $isoWeek: "$Transaction_Date" },
+        nb_transactions: { $sum: 1 },
+        nb_fraudes: { $sum: { $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, 1, 0] } },
+        montant_total_fraudes: {
+          $sum: {
+            $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, "$Transaction_Amount (in Million)", 0]
+          }
+        }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        semaine: "$_id",
+        nb_transactions: 1,
+        nb_fraudes: 1,
+        montant_total_fraudes: 1,
+        montant_moyen_fraude: {
+          $round: [
+            { $divide: ["$montant_total_fraudes", { $max: ["$nb_fraudes", 1] }] },
+            2
+          ]
+        }
+      }
+    },
+    { $sort: { semaine: 1 } }
+  ]);
+
+  // Question 5.2.1
+// Analyse hebdomadaire des fraudes
+db.transactions.aggregate([
+    {
+      $match: {
+        Transaction_Date: { $type: "date" },
+        "Transaction_Amount (in Million)": { $type: "number" }
+      }
+    },
+    {
+      $group: {
+        _id: { $isoWeek: "$Transaction_Date" },
+        nb_transactions: { $sum: 1 },
+        nb_fraudes: { $sum: { $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, 1, 0] } },
+        montant_total_fraudes: {
+          $sum: {
+            $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, "$Transaction_Amount (in Million)", 0]
+          }
+        }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        semaine: "$_id",
+        nb_transactions: 1,
+        nb_fraudes: 1,
+        montant_total_fraudes: 1,
+        montant_moyen_fraude: {
+          $round: [
+            { $divide: ["$montant_total_fraudes", { $max: ["$nb_fraudes", 1] }] },
+            2
+          ]
+        }
+      }
+    },
+    { $sort: { semaine: 1 } }
+  ]);
+  
+  // Résultat (extrait) :
+  // Semaine 1 : 1971 transactions, 68 fraudes, 353M total, moy 5.19M
+  // Semaine 2 : 2834 transactions, 104 fraudes, 519M total, moy 4.99M
+  // Semaine 3 : 2884 transactions, 95 fraudes, 513M total, moy 5.40M
+  // Semaine 4 : 2805 transactions, 88 fraudes, 477M total, moy 5.42M
+  // Les fraudes sont régulières d'une semaine à l'autre (~3-4% par semaine)
+  // Le montant moyen par fraude est stable autour de 5M
+
+  // Question 5.2.2
+// Analyse par groupes de risque selon Previous_Fraud_Count
+db.transactions.aggregate([
+    {
+      $match: {
+        Previous_Fraud_Count: { $type: "number" },
+        "Transaction_Amount (in Million)": { $type: "number" }
+      }
+    },
+    {
+      $addFields: {
+        groupe_risque: {
+          $switch: {
+            branches: [
+              { case: { $eq: ["$Previous_Fraud_Count", 0] }, then: "Groupe 1 - Propres" },
+              { case: { $lte: ["$Previous_Fraud_Count", 2] }, then: "Groupe 2 - Risque modéré" }
+            ],
+            default: "Groupe 3 - Haut risque"
+          }
+        }
+      }
+    },
+    {
+      $group: {
+        _id: "$groupe_risque",
+        total: { $sum: 1 },
+        nb_fraudes: { $sum: { $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, 1, 0] } },
+        montant_moyen: { $avg: "$Transaction_Amount (in Million)" }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        groupe: "$_id",
+        total: 1,
+        nb_fraudes: 1,
+        taux_fraude_pct: {
+          $round: [{ $multiply: [{ $divide: ["$nb_fraudes", "$total"] }, 100] }, 2]
+        },
+        montant_moyen: { $round: ["$montant_moyen", 2] }
+      }
+    },
+    { $sort: { groupe: 1 } }
+  ]);
+  
+  // Résultat :
+  // Groupe 1 (Propres, count=0): 24594 transactions, 792 fraudes, taux 3.22%, moy 5.01M
+  // Groupe 2 (Risque modéré, count 1-2):  24622 transactions, 858 fraudes, taux 3.48%, moy 4.99M
+  // Groupe 3 (Haut risque, count>2):  aucun client (le max est 2 dans le dataset)
+  // Le taux de fraude est légèrement plus élevé pour le groupe 2 (3.48% vs 3.22%),
+  // mais la différence est faible
+
+  // Question 5.2.3
+// Heures de pointe de fraude : ratio fraudes/total par heure, top 5
+db.transactions.aggregate([
+    {
+      $match: {
+        Transaction_Time: { $type: "string", $ne: "" }
+      }
+    },
+    {
+      $project: {
+        heure: { $toInt: { $substr: ["$Transaction_Time", 0, 2] } },
+        Fraud_Label: 1
+      }
+    },
+    {
+      $group: {
+        _id: "$heure",
+        total: { $sum: 1 },
+        nb_fraudes: { $sum: { $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, 1, 0] } }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        heure: "$_id",
+        total: 1,
+        nb_fraudes: 1,
+        ratio_fraude_pct: {
+          $round: [{ $multiply: [{ $divide: ["$nb_fraudes", "$total"] }, 100] }, 2]
+        }
+      }
+    },
+    { $sort: { ratio_fraude_pct: -1 } },
+    { $limit: 5 }
+  ]);
+  
+  // Résultat - Top 5 heures les plus risquées :
+  // 13h : 4.14% (85 fraudes / 2052 transactions)
+  // 21h : 4.08% (82 fraudes / 2009 transactions)
+  // 2h  : 3.89% (79 fraudes / 2031 transactions)
+  // 23h : 3.70% (76 fraudes / 2052 transactions)
+  // 8h  : 3.56% (71 fraudes / 1996 transactions)
+  // Cohérent avec l'analyse 3.1.1, les heures 13h et 21h restent les plus à risque
+  // Les heures nocturnes (2h, 23h) sont aussi présentes dans le top 5
+
+
+  // Question 5.3.1
+// Création de la collection merchants avec 10 marchands fictifs
+db.merchants.insertMany([
+    { Merchant_ID: 65819, nom: "TechWorld", adresse: "123 Main St, Dubai", categorie: "Electronics", date_ouverture: ISODate("2020-01-15") },
+    { Merchant_ID: 28999, nom: "LuxeJewels", adresse: "45 Gold Ave, Singapore", categorie: "Jewelry", date_ouverture: ISODate("2019-06-20") },
+    { Merchant_ID: 95335, nom: "FashionHub", adresse: "78 Style Rd, London", categorie: "Clothing", date_ouverture: ISODate("2021-03-10") },
+    { Merchant_ID: 71892, nom: "QuickMart", adresse: "12 Market St, Lahore", categorie: "Grocery", date_ouverture: ISODate("2018-11-05") },
+    { Merchant_ID: 82108, nom: "GasStation Pro", adresse: "90 Highway Blvd, Karachi", categorie: "Fuel", date_ouverture: ISODate("2017-08-22") },
+    { Merchant_ID: 26794, nom: "DineFinest", adresse: "34 Food Lane, Istanbul", categorie: "Restaurant", date_ouverture: ISODate("2022-02-14") },
+    { Merchant_ID: 22077, nom: "CashPoint ATM", adresse: "56 Bank St, Mumbai", categorie: "ATM", date_ouverture: ISODate("2016-05-30") },
+    { Merchant_ID: 20408, nom: "ElectroPeak", adresse: "67 Tech Park, Tokyo", categorie: "Electronics", date_ouverture: ISODate("2020-09-18") },
+    { Merchant_ID: 42326, nom: "StyleZone", adresse: "89 Fashion Ave, Paris", categorie: "Clothing", date_ouverture: ISODate("2021-07-25") },
+    { Merchant_ID: 67448, nom: "FreshBite", adresse: "23 Organic Rd, Berlin", categorie: "Grocery", date_ouverture: ISODate("2019-12-01") }
+  ]);
+  
+  // Pipeline de jointure : transactions frauduleuses + infos marchands
+  db.transactions.aggregate([
+    { $match: { Fraud_Label: "Fraud" } },
+    {
+      $lookup: {
+        from: "merchants",
+        localField: "Merchant_ID",
+        foreignField: "Merchant_ID",
+        as: "merchant_info"
+      }
+    },
+    { $unwind: "$merchant_info" },
+    {
+      $project: {
+        _id: 0,
+        Transaction_ID: 1,
+        "Transaction_Amount (in Million)": 1,
+        Fraud_Label: 1,
+        "merchant_info.nom": 1,
+        "merchant_info.adresse": 1,
+        "merchant_info.categorie": 1,
+        "merchant_info.date_ouverture": 1
+      }
+    },
+    { $limit: 5 }
+  ]);
+  
+  // Résultat : le $lookup joint correctement les transactions avec les marchands
+  // $unwind déplie le tableau merchant_info en un objet simple
+  // Exemple : Transaction 885280 (4M, Fraud) : GasStation Pro, Karachi
+
+  // Question 5.3.2
+// Création de la collection customers avec 10 clients fictifs
+db.customers.insertMany([
+    { Customer_ID: 67961, nom: "Ali Khan", email: "ali@mail.com", ville: "Lahore", date_inscription: ISODate("2020-03-15") },
+    { Customer_ID: 72748, nom: "Sara Ahmed", email: "sara@mail.com", ville: "Dubai", date_inscription: ISODate("2019-07-20") },
+    { Customer_ID: 77250, nom: "Omar Hassan", email: "omar@mail.com", ville: "Karachi", date_inscription: ISODate("2021-01-10") },
+    { Customer_ID: 15303, nom: "Fatima Ali", email: "fatima@mail.com", ville: "Istanbul", date_inscription: ISODate("2018-11-05") },
+    { Customer_ID: 43223, nom: "Yusuf Demir", email: "yusuf@mail.com", ville: "Singapore", date_inscription: ISODate("2022-05-18") },
+    { Customer_ID: 10985, nom: "Aisha Patel", email: "aisha@mail.com", ville: "Mumbai", date_inscription: ISODate("2020-08-22") },
+    { Customer_ID: 88220, nom: "Ravi Kumar", email: "ravi@mail.com", ville: "Delhi", date_inscription: ISODate("2017-04-30") },
+    { Customer_ID: 28195, nom: "Nadia Mahmoud", email: "nadia@mail.com", ville: "Cairo", date_inscription: ISODate("2021-09-14") },
+    { Customer_ID: 23615, nom: "Chen Wei", email: "chen@mail.com", ville: "Tokyo", date_inscription: ISODate("2019-02-28") },
+    { Customer_ID: 51780, nom: "Priya Singh", email: "priya@mail.com", ville: "London", date_inscription: ISODate("2020-12-01") }
+  ]);
+  
+  // Pipeline de profil de risque client avec $lookup
+  db.customers.aggregate([
+    {
+      $lookup: {
+        from: "transactions",
+        localField: "Customer_ID",
+        foreignField: "Customer_ID",
+        as: "transactions"
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        Customer_ID: 1,
+        nom: 1,
+        ville: 1,
+        date_inscription: 1,
+        nb_transactions: { $size: "$transactions" },
+        nb_fraudes: {
+          $size: {
+            $filter: {
+              input: "$transactions",
+              as: "t",
+              cond: { $eq: ["$$t.Fraud_Label", "Fraud"] }
+            }
+          }
+        },
+        montant_moyen: { $round: [{ $avg: "$transactions.Transaction_Amount (in Million)" }, 2] },
+        score_risque: {
+          $round: [
+            {
+              $multiply: [
+                {
+                  $divide: [
+                    {
+                      $size: {
+                        $filter: {
+                          input: "$transactions",
+                          as: "t",
+                          cond: { $eq: ["$$t.Fraud_Label", "Fraud"] }
+                        }
+                      }
+                    },
+                    { $max: [{ $size: "$transactions" }, 1] }
+                  ]
+                },
+                100
+              ]
+            },
+            2
+          ]
+        }
+      }
+    },
+    { $sort: { score_risque: -1 } }
+  ]);
+  
+  // Résultat :
+  // Yusuf Demir (43223) : 6 transactions, 1 fraude, score 16.67% (seul client à risque)
+  // Les 9 autres clients : 0 fraude, score 0%
+  // Le profil de risque combine infos client + historique de transactions
+  // grâce au $lookup qui joint les deux collections
+
+  // Question 5.4.1
+// Score de suspicion pondéré par facteurs de risque
+// International (+3), Nouveau marchand (+2), Heure inhabituelle (+2),
+// Distance > 100km (+2), Montant > 2x moyenne (+3),
+// Failed_Transaction_Count (+1 par échec)
+db.transactions.aggregate([
+    {
+      $match: {
+        "Transaction_Amount (in Million)": { $type: "number" },
+        "Avg_Transaction_Amount (in Million)": { $type: "number" }
+      }
+    },
+    {
+      $addFields: {
+        score_suspicion: {
+          $sum: [
+            { $cond: ["$Is_International_Transaction", 3, 0] },
+            { $cond: ["$Is_New_Merchant", 2, 0] },
+            { $cond: ["$Unusual_Time_Transaction", 2, 0] },
+            { $cond: [{ $gt: ["$Distance_From_Home", 100] }, 2, 0] },
+            { $cond: [{ $gt: ["$Transaction_Amount (in Million)", { $multiply: ["$Avg_Transaction_Amount (in Million)", 2] }] }, 3, 0] },
+            { $cond: [{ $gt: ["$Failed_Transaction_Count", 0] }, "$Failed_Transaction_Count", 0] }
+          ]
+        }
+      }
+    },
+    { $sort: { score_suspicion: -1 } },
+    { $limit: 50 },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: 1 },
+        nb_fraudes: { $sum: { $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, 1, 0] } },
+        score_max: { $max: "$score_suspicion" },
+        score_min: { $min: "$score_suspicion" }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        total: 1,
+        nb_fraudes: 1,
+        score_max: 1,
+        score_min: 1
+      }
+    }
+  ]);
+  
+  // Résultat : 50 transactions avec score max de 14, 0 fraudes
+  // Aucune des 50 transactions les plus suspectes n'est réellement frauduleuse
+  // Cela confirme que dans ce dataset, les fraudes sont distribuées
+  // de manière aléatoire et ne corrèlent pas fortement avec les indicateurs
+  // comportementaux classiques (distance, heure, nouveau marchand, etc.)
+
+  // Question 5.4.2
+// Vue matérialisée daily_fraud_stats avec $out
+// Cette collection peut être rafraîchie quotidiennement en relançant le pipeline
+db.transactions.aggregate([
+    {
+      $match: {
+        Transaction_Date: { $type: "date" },
+        "Transaction_Amount (in Million)": { $type: "number" }
+      }
+    },
+    {
+      $group: {
+        _id: { $dateToString: { format: "%Y-%m-%d", date: "$Transaction_Date" } },
+        nb_transactions: { $sum: 1 },
+        nb_fraudes: { $sum: { $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, 1, 0] } },
+        montant_total_fraudes: {
+          $sum: {
+            $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, "$Transaction_Amount (in Million)", 0]
+          }
+        }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        date: "$_id",
+        nb_transactions: 1,
+        nb_fraudes: 1,
+        montant_total_fraudes: 1,
+        taux_fraude_pct: {
+          $round: [{ $multiply: [{ $divide: ["$nb_fraudes", { $max: ["$nb_transactions", 1] }] }, 100] }, 2]
+        }
+      }
+    },
+    { $sort: { date: 1 } },
+    { $out: "daily_fraud_stats" }
+  ]);
+  
+  // Vérification
+  db.daily_fraud_stats.countDocuments();
+  // Résultat : 121 documents (121 jours de données)
+  // Cette vue matérialisée pré-calcule les stats quotidiennes,
+  // évitant de recalculer à chaque requête sur la collection principale
+  // Pour la mise à jour quotidienne, il suffit de relancer ce pipeline
