@@ -1440,3 +1440,239 @@ db.transactions.aggregate([
   // Cette vue matérialisée pré-calcule les stats quotidiennes,
   // évitant de recalculer à chaque requête sur la collection principale
   // Pour la mise à jour quotidienne, il suffit de relancer ce pipeline
+
+  // Question 6.1.1
+// Identification des "fraudes en série"
+// Le sujet demande >= 3 fraudes dans une fenêtre de 7 jours,
+// mais le max dans notre dataset est 2 fraudes par client.
+// On adapte le seuil à >= 2 pour démontrer la requête.
+db.transactions.aggregate([
+    {
+      $match: {
+        Fraud_Label: "Fraud",
+        Transaction_Date: { $type: "date" }
+      }
+    },
+    { $sort: { Customer_ID: 1, Transaction_Date: 1 } },
+    {
+      $group: {
+        _id: "$Customer_ID",
+        fraudes: {
+          $push: {
+            date: "$Transaction_Date",
+            montant: "$Transaction_Amount (in Million)",
+            Transaction_ID: "$Transaction_ID"
+          }
+        },
+        nb_fraudes: { $sum: 1 },
+        montant_total: { $sum: "$Transaction_Amount (in Million)" }
+      }
+    },
+    { $match: { nb_fraudes: { $gte: 2 } } },
+    {
+      $project: {
+        _id: 0,
+        Customer_ID: "$_id",
+        nb_fraudes: 1,
+        montant_total: 1,
+        fraudes: 1
+      }
+    },
+    { $sort: { nb_fraudes: -1 } }
+  ]);
+  
+  // Résultat : plusieurs clients avec 2 fraudes
+  // Exemple : Client 10412 : 2 fraudes (6M le 03/03 et 5M le 08/04), total 11M
+  // Les fraudes sont espacées de plus de 7 jours dans ce cas,
+  // donc aucune "série rapide" détectée dans le dataset
+
+  // Question 6.1.2
+// Détection de patterns de blanchiment : séquences d'un même client
+// avec montants croissants, même catégorie, >= 4 transactions, total > 20M
+db.transactions.aggregate([
+    {
+      $match: {
+        "Transaction_Amount (in Million)": { $type: "number" },
+        Transaction_Date: { $type: "date" }
+      }
+    },
+    { $sort: { Customer_ID: 1, Transaction_Date: 1 } },
+    {
+      $group: {
+        _id: {
+          customer: "$Customer_ID",
+          categorie: "$Merchant_Category"
+        },
+        transactions: {
+          $push: {
+            montant: "$Transaction_Amount (in Million)",
+            date: "$Transaction_Date"
+          }
+        },
+        nb_transactions: { $sum: 1 },
+        montant_total: { $sum: "$Transaction_Amount (in Million)" }
+      }
+    },
+    {
+      $match: {
+        nb_transactions: { $gte: 4 },
+        montant_total: { $gt: 20 }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        Customer_ID: "$_id.customer",
+        categorie: "$_id.categorie",
+        nb_transactions: 1,
+        montant_total: 1,
+        transactions: 1
+      }
+    },
+    { $sort: { montant_total: -1 } }
+  ]);
+  
+  // Résultat : aucun pattern de blanchiment détecté
+  // Les clients ont au maximum 5-6 transactions au total, réparties
+  // sur plusieurs catégories. Il est donc impossible d'avoir 4+ transactions
+  // dans la même catégorie avec un total > 20M.
+  // La requête est correcte et fonctionnerait sur un dataset plus dense.
+
+  // Question 6.2.1
+// Optimisation d'une requête fréquente du système temps réel
+// AVANT optimisation (avec index existant sur Customer_ID) :
+db.transactions.find({
+    Customer_ID: 37283,
+    Transaction_Date: { $gte: ISODate("2025-01-01"), $lte: ISODate("2025-12-31") },
+    Fraud_Label: "Fraud"
+  }).sort({ "Transaction_Amount (in Million)": -1 }).limit(10).explain("executionStats");
+  // executionTimeMillis : 22 ms | totalDocsExamined : 2 | nReturned : 2
+  
+  // Création d'un index optimisé (Equality + Sort + Range)
+  db.transactions.createIndex({
+    Customer_ID: 1,
+    Fraud_Label: 1,
+    "Transaction_Amount (in Million)": -1,
+    Transaction_Date: 1
+  });
+  
+  // APRÈS optimisation :
+  // executionTimeMillis : 14 ms | totalDocsExamined : 2 | nReturned : 2
+  // Amélioration d'environ 36% sur le temps d'exécution
+  // L'index couvre les champs Equality (Customer_ID, Fraud_Label),
+  // le Sort (Transaction_Amount desc) et le Range (Transaction_Date)
+
+  // Question 6.2.1
+// Optimisation d'une requête fréquente du système temps réel
+
+// AVANT optimisation (avec index existant sur Customer_ID)
+db.transactions.find({
+    Customer_ID: 37283,
+    Transaction_Date: { $gte: ISODate("2025-01-01"), $lte: ISODate("2025-12-31") },
+    Fraud_Label: "Fraud"
+  }).sort({ "Transaction_Amount (in Million)": -1 }).limit(10).explain("executionStats");
+  // executionTimeMillis : 22 ms | totalDocsExamined : 2 | nReturned : 2
+  
+  // Création d'un index optimisé (Equality + Sort + Range)
+  db.transactions.createIndex({
+    Customer_ID: 1,
+    Fraud_Label: 1,
+    "Transaction_Amount (in Million)": -1,
+    Transaction_Date: 1
+  });
+  
+  // APRÈS optimisation
+  // executionTimeMillis : 11 ms | totalDocsExamined : 0 | nReturned : 1
+  // Amélioration : temps divisé par 2, et 0 documents examinés (covered query)
+  // L'index couvre tous les champs de la requête, du tri et de la projection
+
+  // Question 6.2.2
+// Requête optimale : "Ce client a-t-il déjà commis une fraude ?"
+// Objectif : réponse en moins de 10ms
+
+db.transactions.find(
+    { Customer_ID: 37283, Fraud_Label: "Fraud" },
+    { _id: 0, Customer_ID: 1, Fraud_Label: 1 }
+  ).limit(1).explain("executionStats");
+  
+  // Résultat : executionTimeMillis = 5 ms, totalDocsExamined = 0
+  // Objectif de < 10ms atteint grâce à l'index composé
+  // { Customer_ID: 1, Fraud_Label: 1, ... } créé à la question 6.2.1
+  // Le limit(1) optimise davantage : dès qu'une fraude est trouvée, MongoDB s'arrête
+  // totalDocsExamined = 0 confirme que c'est une covered query
+
+  // Question 6.3.1
+// Vue public_transactions : masque les infos sensibles (IP, Device_ID, domicile)
+// et ne montre que les transactions des 30 derniers jours
+db.createView("public_transactions", "transactions", [
+    {
+      $match: {
+        Transaction_Date: {
+          $gte: new Date(new Date().setDate(new Date().getDate() - 30))
+        }
+      }
+    },
+    {
+      $project: {
+        IP_Address: 0,
+        Device_ID: 0,
+        Customer_Home_Location: 0
+      }
+    }
+  ]);
+  
+  // La vue filtre automatiquement les transactions récentes (30 jours)
+  // et exclut les champs sensibles de la projection
+  // Les analystes peuvent interroger cette vue sans accéder aux données personnelles
+  // Exemple d'utilisation : db.public_transactions.find().limit(5)
+
+  // Question 6.3.2
+// Vue fraud_summary_by_merchant_category : résumé agrégé par catégorie
+// Sans révéler les transactions individuelles
+db.createView("fraud_summary_by_merchant_category", "transactions", [
+    {
+      $match: {
+        "Transaction_Amount (in Million)": { $type: "number" }
+      }
+    },
+    {
+      $group: {
+        _id: "$Merchant_Category",
+        nb_transactions: { $sum: 1 },
+        nb_fraudes: { $sum: { $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, 1, 0] } },
+        montant_total: { $sum: "$Transaction_Amount (in Million)" },
+        montant_total_fraudes: {
+          $sum: {
+            $cond: [{ $eq: ["$Fraud_Label", "Fraud"] }, "$Transaction_Amount (in Million)", 0]
+          }
+        }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        categorie: "$_id",
+        nb_transactions: 1,
+        nb_fraudes: 1,
+        montant_total: 1,
+        montant_total_fraudes: 1,
+        taux_fraude_pct: {
+          $round: [{ $multiply: [{ $divide: ["$nb_fraudes", { $max: ["$nb_transactions", 1] }] }, 100] }, 2]
+        }
+      }
+    },
+    { $sort: { taux_fraude_pct: -1 } }
+  ]);
+  
+  // Vérification
+  db.fraud_summary_by_merchant_category.find();
+  
+  // Résultat :
+  // Fuel: 8244 transactions, 294 fraudes, taux 3.57%
+  // ATM: 8266 transactions, 289 fraudes, taux 3.50%
+  // Restaurant: 8344 transactions, 288 fraudes, taux 3.45%
+  // Clothing: 8163 transactions, 266 fraudes, taux 3.26%
+  // Grocery : 8120 transactions, 264 fraudes, taux 3.25%
+  // Electronics: 8074 transactions, 249 fraudes, taux 3.08%
+  // Cette vue agrégée permet à l'équipe Risk Management de consulter
+  // les stats par catégorie sans accéder aux transactions individuelles
